@@ -784,12 +784,12 @@ async def main():
 
 		if i < total_count - 1 and account.provider == accounts[i + 1].provider:
 			provider_config = app_config.get_provider(account.provider)
-			if provider_config and provider_config.browser_check_in:
+			if provider_config and (provider_config.browser_check_in or account.provider == 'agentrouter'):
 				cooldown = get_browser_account_cooldown_seconds()
 				if cooldown > 0:
 					print(
 						f'[INFO] Cooling down {cooldown:g}s before the next '
-						f'{account.provider} browser check-in account'
+						f'{account.provider} check-in account'
 					)
 					await asyncio.sleep(cooldown)
 
