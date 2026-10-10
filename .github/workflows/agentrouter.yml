@@ -1,6 +1,8 @@
 name: AgentRouter 自动签到
 
 on:
+  schedule:
+    - cron: '0 0,8,16 * * *'
   workflow_dispatch:
     inputs:
       debug:

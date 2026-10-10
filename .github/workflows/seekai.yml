@@ -1,6 +1,9 @@
 name: SeekAI 自动签到
 
 on:
+  schedule:
+    # 00:05, 08:05, and 16:05 Asia/Shanghai (UTC 16:05, 00:05, 08:05).
+    - cron: '5 0,8,16 * * *'
   workflow_dispatch:
     inputs:
       debug:
