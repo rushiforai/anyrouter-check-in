@@ -76,3 +76,93 @@ async def test_refresh_access_token_uses_response_token(monkeypatch):
 
 	monkeypatch.setattr(seekai_checkin, '_page_api', fake_api)
 	assert await seekai_checkin.refresh_access_token(page, account) == 'NEW'
+
+
+async def _noop(*_args, **_kwargs):
+	return None
+
+
+def _locator(*, count=1, enabled=True):
+	async def _count():
+		return count
+
+	async def _is_enabled():
+		return enabled
+
+	return SimpleNamespace(count=_count, is_enabled=_is_enabled)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkin_control_polls_until_the_button_renders(monkeypatch):
+	states = ['missing', 'missing', 'ready']
+	locator = _locator()
+
+	async def fake_locate(_page):
+		return states.pop(0), locator
+
+	monkeypatch.setattr(seekai_checkin, '_locate_checkin_control', fake_locate)
+	state, control = await seekai_checkin._wait_for_checkin_control(SimpleNamespace(wait_for_timeout=_noop), 5_000)
+	assert state == seekai_checkin.CONTROL_READY
+	assert control is locator
+	assert states == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_checkin_control_gives_up_at_the_deadline(monkeypatch):
+	calls = []
+
+	async def fake_locate(_page):
+		calls.append(1)
+		return seekai_checkin.CONTROL_MISSING, None
+
+	monkeypatch.setattr(seekai_checkin, '_locate_checkin_control', fake_locate)
+	state, control = await seekai_checkin._wait_for_checkin_control(SimpleNamespace(wait_for_timeout=_noop), 0)
+	assert (state, control) == (seekai_checkin.CONTROL_MISSING, None)
+	assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_click_and_complete_reports_a_signed_out_redirect(monkeypatch):
+	async def fake_locate(_page):
+		return seekai_checkin.CONTROL_MISSING, None
+
+	monkeypatch.setattr(seekai_checkin, '_locate_checkin_control', fake_locate)
+	page = SimpleNamespace(
+		wait_for_timeout=_noop,
+		url='https://seekai.cc/sign-in?redirect=%2Fprofile',
+		inner_text=lambda *_args: 'Sign in',
+	)
+	result = await seekai_checkin.click_and_complete_checkin(page, SeekAIAccount('one', {}), 0)
+	assert result.success is False
+	assert 'Check in now button not found' in result.message
+	assert 'no longer signed in' in result.message
+
+
+@pytest.mark.asyncio
+async def test_click_and_complete_treats_a_disabled_button_as_checked_in(monkeypatch):
+	locator = _locator(enabled=False)
+
+	async def fake_locate(_page):
+		return seekai_checkin.CONTROL_READY, locator
+
+	monkeypatch.setattr(seekai_checkin, '_locate_checkin_control', fake_locate)
+	page = SimpleNamespace(wait_for_timeout=_noop, url='https://seekai.cc/profile', inner_text=_noop)
+	result = await seekai_checkin.click_and_complete_checkin(page, SeekAIAccount('one', {}), 0)
+	assert result.success is True
+	assert result.already_checked is True
+
+
+@pytest.mark.asyncio
+async def test_click_and_complete_reports_the_rendered_page_when_the_card_is_absent(monkeypatch):
+	async def fake_locate(_page):
+		return seekai_checkin.CONTROL_MISSING, None
+
+	async def fake_inner_text(_selector):
+		return 'Daily Check-in\n  Check in daily to receive random quota rewards'
+
+	monkeypatch.setattr(seekai_checkin, '_locate_checkin_control', fake_locate)
+	page = SimpleNamespace(wait_for_timeout=_noop, url='https://seekai.cc/profile', inner_text=fake_inner_text)
+	result = await seekai_checkin.click_and_complete_checkin(page, SeekAIAccount('one', {}), 0)
+	assert result.success is False
+	assert 'https://seekai.cc/profile' in result.message
+	assert 'Daily Check-in' in result.message

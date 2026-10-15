@@ -297,23 +297,65 @@ async def _read_checkin_response(response: Any) -> dict[str, Any]:
 	return {'status': int(response.status), 'url': str(response.url), 'body': body}
 
 
+CONTROL_WAIT_TIMEOUT_MS = 30_000
+CONTROL_POLL_INTERVAL_MS = 500
+CHECKIN_BUTTON_LABELS = ('Check in now', '立即签到')
+CHECKED_IN_BUTTON_LABELS = ('Checked in', '已签到')
+CONTROL_READY = 'ready'
+CONTROL_CHECKED_IN = 'checked_in'
+CONTROL_MISSING = 'missing'
+
+
+async def _locate_checkin_control(page: Any) -> tuple[str, Any | None]:
+	"""Locate the check-in card control without waiting for it to render."""
+	for label in CHECKED_IN_BUTTON_LABELS:
+		button = page.get_by_role('button', name=label, exact=True)
+		if await button.count() > 0:
+			return CONTROL_CHECKED_IN, button
+	for label in CHECKIN_BUTTON_LABELS:
+		for locator in (page.get_by_role('button', name=label, exact=True), page.get_by_text(label, exact=True)):
+			if await locator.count() > 0:
+				return CONTROL_READY, locator
+	return CONTROL_MISSING, None
+
+
+async def _wait_for_checkin_control(page: Any, timeout_ms: int) -> tuple[str, Any | None]:
+	"""Poll for the check-in control.
+
+	The card renders a skeleton until its check-in status query resolves and the
+	button label becomes ``Loading...`` while a check-in is in flight, so a single
+	sample taken right after navigation can legitimately find no control at all.
+	"""
+	deadline = asyncio.get_running_loop().time() + max(0, timeout_ms) / 1000
+	while True:
+		state, locator = await _locate_checkin_control(page)
+		if state != CONTROL_MISSING or asyncio.get_running_loop().time() >= deadline:
+			return state, locator
+		await page.wait_for_timeout(CONTROL_POLL_INTERVAL_MS)
+
+
+async def _describe_page(page: Any) -> str:
+	"""Explain where the browser ended up so a missing control stays diagnosable."""
+	try:
+		url = str(page.url)
+	except Exception:  # nosec B110
+		return ''
+	if '/sign-in' in url or '/login' in url:
+		return f' (redirected to {url}: the stored session is no longer signed in)'
+	try:
+		text = ' '.join((await page.inner_text('body')).split())[:200]
+	except Exception:  # nosec B110
+		text = ''
+	return f' (on {url}; visible text: {text})' if text else f' (on {url})'
+
+
 async def click_and_complete_checkin(page: Any, account: SeekAIAccount, timeout_ms: int) -> CheckinResult:
 	"""Click the profile button and wait through both Turnstile API requests."""
-	checked_button = page.get_by_role('button', name='Checked in', exact=True)
-	if await checked_button.count() == 0:
-		checked_button = page.get_by_role('button', name='已签到', exact=True)
-	if await checked_button.count() > 0:
+	state, button = await _wait_for_checkin_control(page, min(timeout_ms, CONTROL_WAIT_TIMEOUT_MS))
+	if state == CONTROL_CHECKED_IN:
 		return CheckinResult(True, already_checked=True, message='Already checked in today')
-
-	button = page.get_by_role('button', name='Check in now', exact=True)
-	if await button.count() == 0:
-		button = page.get_by_role('button', name='立即签到', exact=True)
-	if await button.count() == 0:
-		button = page.get_by_text('Check in now', exact=True)
-	if await button.count() == 0:
-		button = page.get_by_text('立即签到', exact=True)
-	if await button.count() == 0:
-		return CheckinResult(False, message='Check in now button not found')
+	if button is None:
+		return CheckinResult(False, message=f'Check in now button not found{await _describe_page(page)}')
 	if not await button.is_enabled():
 		return CheckinResult(True, already_checked=True, message='Check in button is disabled')
 
